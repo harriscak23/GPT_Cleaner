@@ -39,7 +39,10 @@ jobs:
 
           echo "${{ secrets.F04_SESSION_ZIP }}" | base64 -d > f04.zip
           unzip -o f04.zip -d sessions
-          
+
+          echo "${{ secrets.F23_SESSION_ZIP }}" | base64 -d > f23.zip
+          unzip -o f23.zip -d sessions
+
           rm *.zip
 
       - name: Run cleaner
