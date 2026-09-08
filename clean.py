@@ -16,6 +16,21 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+def validate_session(page, account):
+    logger.info(f"Checking login status for {account}")
+
+    login_button = page.get_by_role(
+        "button",
+        name="Log in"
+    ).nth(1)
+
+    if login_button.count() > 0:
+        raise RuntimeError(
+            f"Session is logged out for {account}."
+        )
+
+    logger.info(f"Session is logged in for {account}")
+
 def get_chats(page):
     return page.locator(CHAT_SELECTOR)
 
@@ -157,6 +172,8 @@ def clean_account(browser, account):
         page = context.new_page()
 
         page.goto(CHATGPT_URL)
+        
+        validate_session(page, account)
 
         logger.info(
             f"Cleaning account: {account}"
@@ -170,7 +187,6 @@ def clean_account(browser, account):
         logger.exception(
             f"Cleaner crashed for {account}."
         )
-        raise
 
     finally:
         if context:
