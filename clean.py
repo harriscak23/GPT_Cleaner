@@ -170,6 +170,7 @@ def clean_account(browser, account):
         logger.exception(
             f"Cleaner crashed for {account}."
         )
+        raise
 
     finally:
         if context:
