@@ -4,7 +4,7 @@ SESSION_DIR = "sessions"
 
 CHANNEL = "chrome"
 
-HEADLESS = True
+HEADLESS = True    
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

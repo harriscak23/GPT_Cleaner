@@ -48,3 +48,15 @@ jobs:
       - name: Run cleaner
         run: |
           python clean.py
+        
+      - name: Persist refreshed sessions
+        if: success()                              # only if the clean worked, so a broken session never overwrites a good one
+        env:
+          GH_TOKEN: ${{ secrets.SECRETS_PAT }}     # permission to edit secrets (explained below)
+        run: |
+          for f in sessions/*.json; do             # once per account file, e.g. sessions/cse.json
+            name=$(basename "$f" .json | tr a-z A-Z)                       # "cse" → "CSE"
+            (cd sessions && zip -q "$name.zip" "$(basename "$f")")         # zip it, as you do by hand
+            gh secret set "${name}_SESSION_ZIP" \
+              --body "$(base64 -w0 sessions/$name.zip)"                    # base64 it and overwrite CSE_SESSION_ZIP
+          done

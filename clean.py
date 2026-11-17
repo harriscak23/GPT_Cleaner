@@ -1,13 +1,16 @@
 import logging
+import sys
 
+import playwright
 from playwright.sync_api import sync_playwright
-
+from datetime import datetime, timezone
 from config import CHATGPT_URL, HEADLESS, CHANNEL, USER_AGENT
 from auth import get_accounts, get_session_path
 
 
 CHAT_SELECTOR = 'a[href^="/c/"]'
-OPTIONS_SELECTOR = 'button[aria-label^="Open conversation options"]'
+
+SESSION_COOKIE = "__Secure-next-auth.session-token"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -16,136 +19,133 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+def log_token_expiry(context, account, label):
+    for c in context.cookies():
+        if c["name"].startswith(SESSION_COOKIE):
+            if c["expires"] == -1:
+                logger.info(f"[{account}] {label}: {c['name']} has no expiry (browser-session cookie)")
+            else:
+                exp = datetime.fromtimestamp(c["expires"], tz=timezone.utc)
+                logger.info(f"[{account}] {label}: {c['name']} expires {exp:%Y-%m-%d %H:%M} UTC")
+
+
 def validate_session(page, account):
     logger.info(f"Checking login status for {account}")
-
-    login_button = page.get_by_role(
-        "button",
-        name="Log in"
-    ).nth(1)
-
-    if login_button.count() > 0:
-        raise RuntimeError(
-            f"Session is logged out for {account}."
-        )
-
+    try:
+        page.locator(CHAT_SELECTOR).first.wait_for(timeout=15000)
+    except Exception:
+        raise RuntimeError(f"Session is logged out for {account}.")
     logger.info(f"Session is logged in for {account}")
 
 def get_chats(page):
     return page.locator(CHAT_SELECTOR)
 
-
-def is_pinned(chat):
-    aria = chat.get_attribute("aria-label") or ""
-    return "pinned conversation" in aria.lower()
-
-
-def delete_chat(page, chat):
+def get_row(page, chat):
+    """The chat's row (role=group, named by its title), narrowed to the one with this exact link."""
     title = chat.inner_text().strip()
     href = chat.get_attribute("href")
-
-    chat.hover()
-
-    chat.locator(OPTIONS_SELECTOR).click()
-
-    page.get_by_test_id(
-        "delete-chat-menu-item"
-    ).click()
-
-    page.get_by_test_id(
-        "delete-conversation-confirm-button"
-    ).click()
-
-    page.locator(
-        f'a[href="{href}"]'
-    ).wait_for(
-        state="detached"
+    row = page.get_by_role("group", name=title).filter(
+        has=page.locator(f'a[href="{href}"]')
     )
+    return row, title, href
 
-    return title
+
+def is_pinned(row):
+    return row.get_by_role("button", name="Unpin chat", exact=True).count() > 0
+
+
+def delete_chat(page, row, href):
+    row.hover()
+    row.get_by_label("Chat actions").click(timeout=5000)
+
+    page.get_by_role("menuitem", name="Delete").click(timeout=5000)
+
+    page.get_by_role("button", name="Delete chat", exact=True).click(timeout=5000)
+
+    page.locator(f'a[href="{href}"]').wait_for(state="detached")
+
+def load_more_chats(page):
+    """Scroll to the bottom of the sidebar. Return True if more chats appeared."""
+    chats = get_chats(page)
+    before = chats.count()
+    if before == 0:
+        return False
+
+    last = chats.last
+    last.scroll_into_view_if_needed()
+    last.hover()                      # put the mouse over the sidebar...
+    page.mouse.wheel(0, 3000)         # ...and scroll it down
+
+    for _ in range(10):               # wait up to 5 seconds for the next batch
+        page.wait_for_timeout(500)
+        if get_chats(page).count() > before:
+            return True
+    return False
 
 
 def delete_all_unpinned(page):
-    
-    # Wait for ChatGPT sidebar to finish rendering
-    # Not good practice
     page.wait_for_timeout(3000)
 
-    chats = get_chats(page)
-
-    if chats.count() == 0:
-        logger.info("Sidebar empty. Nothing to delete.")
-        return
-
     deleted_count = 0
+    failed_hrefs = set()
 
     while True:
         chats = get_chats(page)
         count = chats.count()
-
         logger.info(f"Loaded chats: {count}")
 
         found_unpinned = False
 
         for i in range(count):
             chat = chats.nth(i)
+            href = chat.get_attribute("href")
+
+            if href in failed_hrefs:
+                continue
 
             try:
-                title = chat.inner_text().strip()
-                pinned = is_pinned(chat)
+                row, title, href = get_row(page, chat)
 
+                pinned = is_pinned(row)
                 logger.info(f"{title} | Pinned: {pinned}")
+                if pinned:
+                    continue
 
-                if not pinned:
-                    deleted_title = delete_chat(page, chat)
-
-                    deleted_count += 1
-                    found_unpinned = True
-
-                    logger.info(
-                        f"Deleted: {deleted_title}"
-                    )
-
-                    # DOM changed, restart search
-                    break
+                delete_chat(page, row, href)
+                deleted_count += 1
+                found_unpinned = True
+                logger.info(f"Deleted: {title}")
+                break                       # DOM changed, rescan
 
             except Exception:
-                logger.exception(
-                    "Failed processing chat."
-                )
+                failed_hrefs.add(href)
+                logger.exception("Failed processing chat.")
 
-        # We scanned all chats and found nothing to delete
-        if not found_unpinned:
-            logger.info(
-                f"Finished. Deleted {deleted_count} chats."
-            )
-            return
+            if not found_unpinned:
+                if load_more_chats(page):
+                    logger.info("Loaded more chats from history.")
+                    continue                  # rescan with the new batch
+
+                logger.info(f"Finished. Deleted {deleted_count}, failed {len(failed_hrefs)}.")
+                if failed_hrefs:
+                    raise RuntimeError(f"{len(failed_hrefs)} chats could not be deleted")
+                return deleted_count
 
 
 def open_sidebar(page):
+    chat_link = page.locator(CHAT_SELECTOR).first
+    close_button = page.get_by_test_id("close-sidebar-button")
+    open_button = page.get_by_role("button", name="Open sidebar")
 
-    close_button = page.get_by_test_id(
-        "close-sidebar-button"
-    )
+    # Wait until the page shows either an open sidebar or the button to open it
+    chat_link.or_(close_button).or_(open_button).first.wait_for()
 
-    # Sidebar already open
-    if close_button.count():
+    if chat_link.is_visible() or close_button.is_visible():
         logger.info("Sidebar already open.")
         return
 
-    open_button = page.get_by_role(
-        "button",
-        name="Open sidebar"
-    )
-
-    open_button.wait_for(
-        state="visible"
-    )
-
     open_button.click()
-
-    close_button.wait_for()
-
+    chat_link.wait_for()
     logger.info("Sidebar opened.")
 
 def clean_account(browser, account):
@@ -156,7 +156,7 @@ def clean_account(browser, account):
         logger.warning(
             f"Skipping {account}: session not found."
         )
-        return
+        return False
 
     context = None
 
@@ -169,6 +169,8 @@ def clean_account(browser, account):
                 "height": 720
             }
         )
+
+        log_token_expiry(context, account, "before")
         page = context.new_page()
 
         page.goto(CHATGPT_URL)
@@ -180,20 +182,23 @@ def clean_account(browser, account):
         )
 
         open_sidebar(page)
-
         delete_all_unpinned(page)
-
+        log_token_expiry(context, account, "after")
+        context.storage_state(path=session_path)   # persist refreshed cookies
+        return True
+    
     except Exception:
         logger.exception(
             f"Cleaner crashed for {account}."
         )
+        return False
 
     finally:
         if context:
             context.close()
 
 def main():
-
+    failed = []
     with sync_playwright() as p:
 
         browser = p.chromium.launch(
@@ -203,13 +208,17 @@ def main():
 
         try:
             for account in get_accounts():
-                clean_account(
+                if not clean_account(
                     browser,
                     account
-            )
-
+                ):
+                    failed.append(account)
         finally:
             browser.close()
+
+        if failed:
+            logger.error(f"Failed accounts: {', '.join(failed)}")
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()
