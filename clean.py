@@ -1,5 +1,6 @@
 import logging
 import sys
+import json
 
 import playwright
 from playwright.sync_api import sync_playwright
@@ -121,15 +122,15 @@ def delete_all_unpinned(page):
                 failed_hrefs.add(href)
                 logger.exception("Failed processing chat.")
 
-            if not found_unpinned:
-                if load_more_chats(page):
-                    logger.info("Loaded more chats from history.")
-                    continue                  # rescan with the new batch
+        if not found_unpinned:
+            if load_more_chats(page):
+                logger.info("Loaded more chats from history.")
+                continue                  # rescan with the new batch
 
-                logger.info(f"Finished. Deleted {deleted_count}, failed {len(failed_hrefs)}.")
-                if failed_hrefs:
-                    raise RuntimeError(f"{len(failed_hrefs)} chats could not be deleted")
-                return deleted_count
+            logger.info(f"Finished. Deleted {deleted_count}, failed {len(failed_hrefs)}.")
+            if failed_hrefs:
+                raise RuntimeError(f"{len(failed_hrefs)} chats could not be deleted")
+            return deleted_count
 
 
 def open_sidebar(page):
@@ -184,7 +185,7 @@ def clean_account(browser, account):
         open_sidebar(page)
         delete_all_unpinned(page)
         log_token_expiry(context, account, "after")
-        context.storage_state(path=session_path)   # persist refreshed cookies
+        save_session(context, session_path)
         return True
     
     except Exception:
@@ -196,6 +197,13 @@ def clean_account(browser, account):
     finally:
         if context:
             context.close()
+
+def save_session(context, session_path):
+    state = context.storage_state()
+    state["cookies"] = [c for c in state["cookies"]
+                        if not c["name"].startswith(("cf_", "__cf", "_cf"))]
+    session_path.write_text(json.dumps(state))
+
 
 def main():
     failed = []
