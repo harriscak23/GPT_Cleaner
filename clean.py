@@ -2,9 +2,8 @@ import logging
 import sys
 import json
 
-import playwright
 from playwright.sync_api import sync_playwright
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from config import CHATGPT_URL, HEADLESS, CHANNEL, USER_AGENT
 from auth import get_accounts, get_session_path
 
@@ -12,6 +11,29 @@ from auth import get_accounts, get_session_path
 CHAT_SELECTOR = 'a[href^="/c/"]'
 
 SESSION_COOKIE = "__Secure-next-auth.session-token"
+
+
+EXPIRY_WARNING_DAYS = 10
+
+def check_token_expiry(context, account):
+    """Fail if the session token is missing or expires within EXPIRY_WARNING_DAYS."""
+    tokens = [c for c in context.cookies() if c["name"].startswith(SESSION_COOKIE)]
+    if not tokens:
+        raise RuntimeError(f"[{account}] No session token found. Run login.py {account}.")
+
+    expiries = [c["expires"] for c in tokens if c["expires"] != -1]
+    if not expiries:
+        return                                  # browser-session cookie, no fixed expiry
+
+    soonest = datetime.fromtimestamp(min(expiries), tz=timezone.utc)
+    days_left = (soonest - datetime.now(timezone.utc)).days
+
+    if days_left < EXPIRY_WARNING_DAYS:
+        raise RuntimeError(
+            f"[{account}] Session expires in {days_left} days ({soonest:%Y-%m-%d}). "
+            f"Run login.py {account} and update the secret."
+        )
+    logger.info(f"[{account}] Session OK, {days_left} days left.")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -186,6 +208,7 @@ def clean_account(browser, account):
         delete_all_unpinned(page)
         log_token_expiry(context, account, "after")
         save_session(context, session_path)
+        check_token_expiry(context, account)
         return True
     
     except Exception:
